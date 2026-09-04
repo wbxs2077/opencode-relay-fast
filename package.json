@@ -1,6 +1,6 @@
 {
   "name": "opencode-relay-fast",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "OpenCode plugin that toggles OpenAI priority service tier (Fast mode) for third-party relay providers such as sub2api",
   "keywords": [
@@ -37,7 +37,8 @@
     "examples",
     "README.md",
     "README.zh-CN.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20"

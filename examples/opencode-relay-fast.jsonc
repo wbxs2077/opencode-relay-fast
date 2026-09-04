@@ -1,9 +1,16 @@
 // Copy this file to ~/.config/opencode/opencode-relay-fast.jsonc
 // (or $XDG_CONFIG_HOME/opencode/opencode-relay-fast.jsonc) and edit it.
 // Comments and trailing commas are allowed. Restart OpenCode after changes.
+//
+// Every list below must be an array of strings. A wrongly typed field or a
+// syntax error disables injection entirely and is reported by `/fast status`.
 {
   // Provider IDs from your opencode.json / opencode.jsonc `provider` map.
   // Their `options.baseURL` is resolved automatically, so you never repeat the URL here.
+  //
+  // If a listed provider shares its baseURL with a provider that is NOT listed,
+  // the plugin cannot tell their requests apart and skips it (see `/fast status`).
+  // List both providers, or put the URL in `baseURLs`, to opt in deliberately.
   "providers": ["my-relay"],
 
   // Optional: extra base URLs to target that are not defined as OpenCode providers.
