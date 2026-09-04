@@ -108,6 +108,22 @@ A matching provider in `opencode.json` looks like this:
 
 Paths can be overridden with `OPENCODE_RELAY_FAST_CONFIG` and `OPENCODE_RELAY_FAST_STATE`.
 
+### Safety rules (fail closed)
+
+Priority processing costs money, so the plugin refuses to guess:
+
+- **Invalid config disables injection.** A malformed file or a wrongly typed field (for example
+  `"models": "gpt-5.5"` instead of an array) is reported in `/fast status` and the log, and
+  nothing is injected until it is fixed.
+- **Providers that share a base URL are skipped.** Requests are matched by URL, so if a selected
+  provider has the same `baseURL` as an unselected one, the plugin cannot tell them apart. It
+  skips that provider and says so in `/fast status`. Either list both providers or add the URL
+  to `baseURLs` to opt in to URL-wide matching.
+- **Only origin and path are recorded.** Credentials, query strings and fragments in request
+  URLs never reach the state file, the log, or the `/fast` prompt.
+- **One wrapper per process.** OpenCode may initialise plugins once per project directory; all
+  instances share one switch, so `/fast off` anywhere stops injection everywhere.
+
 ## Use
 
 ```text
@@ -145,8 +161,9 @@ npm test      # tsc build + node --test
 npm run dev   # opencode plugin dev
 ```
 
-The matcher (`RelayFastMatcher`), the JSONC stripper and `parseConfig` are exported for tests
-and for reuse in other plugins.
+The matcher (`RelayFastMatcher`), the JSONC stripper, `parseConfig` and the
+`installFetchWrapper` / `uninstallFetchWrapper` pair are exported for tests and for reuse in
+other plugins.
 
 ## Credits
 

@@ -68,12 +68,6 @@ type Target = {
     source: string;
 };
 
-type InjectionResult = {
-    init: RequestInit | undefined;
-    model?: string;
-    url?: string;
-};
-
 const DEFAULT_CONFIG: RelayFastConfig = {
     providers: [],
     baseURLs: [],
@@ -88,7 +82,7 @@ const DEFAULT_CONFIG: RelayFastConfig = {
 /* Small helpers                                                             */
 /* ------------------------------------------------------------------------ */
 
-/** Strip `//`, `/* *\/` comments and trailing commas so JSONC parses as JSON. */
+/** Strip `//` and `/* *\/` comments plus trailing commas so JSONC parses as JSON. String-aware. */
 export function stripJsonc(text: string): string {
     let out = "";
     let i = 0;
@@ -129,16 +123,30 @@ export function stripJsonc(text: string): string {
             continue;
         }
 
+        if (ch === "}" || ch === "]") {
+            // Trailing comma outside a string: drop the last emitted `,` if only whitespace follows it.
+            const trimmed = out.replace(/\s+$/, "");
+            if (trimmed.endsWith(",")) out = trimmed.slice(0, -1) + out.slice(trimmed.length);
+        }
+
         out += ch;
         i += 1;
     }
 
-    return out.replace(/,(\s*[}\]])/g, "$1");
+    return out;
 }
 
-function stringArray(value: unknown): string[] | undefined {
-    if (!Array.isArray(value)) return undefined;
-    return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+/** Returns the trimmed array, or throws when the key is present but not an array of non-empty strings. */
+function stringArray(raw: Record<string, unknown>, key: string): string[] | undefined {
+    const value = raw[key];
+    if (value === undefined || value === null) return undefined;
+    if (
+        !Array.isArray(value) ||
+        !value.every((item) => typeof item === "string" && item.trim().length > 0)
+    ) {
+        throw new Error(`"${key}" must be an array of non-empty strings`);
+    }
+    return value.map((item: string) => item.trim());
 }
 
 function normaliseBaseUrl(raw: string): string | undefined {
@@ -167,16 +175,13 @@ function resolveUrl(input: RequestInfo | URL): string {
     return input.url;
 }
 
-function parseBody(body: BodyInit | null | undefined): Record<string, unknown> | undefined {
-    let raw: string;
-    if (typeof body === "string") {
-        raw = body;
-    } else if (body instanceof Uint8Array) {
-        raw = new TextDecoder().decode(body);
-    } else {
-        return undefined;
-    }
+function bodyToString(body: BodyInit): string | undefined {
+    if (typeof body === "string") return body;
+    if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+    return undefined;
+}
 
+function parseJsonObject(raw: string): Record<string, unknown> | undefined {
     try {
         const parsed: unknown = JSON.parse(raw);
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
@@ -186,7 +191,7 @@ function parseBody(body: BodyInit | null | undefined): Record<string, unknown> |
     }
 }
 
-/** Drop a caller-supplied Content-Length header; the body length changes after injection. */
+/** Copy headers without Content-Length; the body length changes after injection. */
 function withoutContentLength(headers: HeadersInit | undefined): HeadersInit | undefined {
     if (!headers) return headers;
 
@@ -207,6 +212,31 @@ function withoutContentLength(headers: HeadersInit | undefined): HeadersInit | u
     return copy;
 }
 
+/**
+ * Normalise `fetch(input, init)` into the pieces the matcher needs. `init`
+ * wins over fields carried by a `Request` input, mirroring the Fetch spec.
+ */
+async function readRequest(
+    input: RequestInfo | URL,
+    init: RequestInit | undefined,
+): Promise<{ method: string; headers: HeadersInit | undefined; body: string | undefined }> {
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : undefined;
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    const headers = init?.headers ?? request?.headers;
+
+    if (init?.body !== undefined && init.body !== null) {
+        return { method, headers, body: bodyToString(init.body) };
+    }
+    if (request?.body) {
+        try {
+            return { method, headers, body: await request.clone().text() };
+        } catch {
+            return { method, headers, body: undefined };
+        }
+    }
+    return { method, headers, body: undefined };
+}
+
 function atomicWriteJson(path: string, value: unknown): void {
     mkdirSync(dirname(path), { recursive: true });
     const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -222,22 +252,25 @@ function atomicWriteJson(path: string, value: unknown): void {
 /* Config and state                                                          */
 /* ------------------------------------------------------------------------ */
 
+/** Parse JSONC config text. Throws on malformed JSON or wrongly typed fields (fail closed). */
 export function parseConfig(text: string): RelayFastConfig {
     const parsed: unknown = JSON.parse(stripJsonc(text));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ...DEFAULT_CONFIG };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("config must be a JSON object");
+    }
     const raw = parsed as Record<string, unknown>;
 
-    const endpoints = stringArray(raw.endpoints)?.map(normaliseEndpoint);
+    const endpoints = stringArray(raw, "endpoints")?.map(normaliseEndpoint);
     const serviceTier =
         typeof raw.serviceTier === "string" && raw.serviceTier.trim()
             ? raw.serviceTier.trim()
             : DEFAULT_SERVICE_TIER;
 
     return {
-        providers: stringArray(raw.providers) ?? [],
-        baseURLs: stringArray(raw.baseURLs) ?? [],
+        providers: stringArray(raw, "providers") ?? [],
+        baseURLs: stringArray(raw, "baseURLs") ?? [],
         endpoints: endpoints && endpoints.length > 0 ? endpoints : DEFAULT_ENDPOINTS,
-        models: stringArray(raw.models) ?? [],
+        models: stringArray(raw, "models") ?? [],
         serviceTier,
         commandModel:
             typeof raw.commandModel === "string" && raw.commandModel.trim()
@@ -287,6 +320,7 @@ export class RelayFastMatcher {
     private endpoints: string[] = [];
     private serviceTier = DEFAULT_SERVICE_TIER;
     private unresolvedProviders: string[] = [];
+    private ambiguousProviders: string[] = [];
 
     constructor(private config: RelayFastConfig) {
         this.endpoints = config.endpoints;
@@ -302,20 +336,44 @@ export class RelayFastMatcher {
             if (prefix) this.targets.push({ prefix, source: `baseURLs: ${raw}` });
         }
         this.unresolvedProviders = [...this.config.providers];
+        this.ambiguousProviders = [];
     }
 
-    /** Resolve `providers` against the provider map found in OpenCode's config. */
+    /**
+     * Resolve `providers` against the provider map found in OpenCode's config.
+     *
+     * Requests are matched by URL, so a selected provider that shares its base URL
+     * with an unselected provider cannot be told apart from it. Such providers are
+     * skipped (fail closed) and reported. List both providers, or use `baseURLs`,
+     * to opt in to URL-wide matching deliberately.
+     */
     resolveProviders(providers: Record<string, { options?: { baseURL?: string } }> | undefined): void {
         this.setExplicitTargets();
         this.unresolvedProviders = [];
 
-        for (const id of this.config.providers) {
-            const baseURL = providers?.[id]?.options?.baseURL;
+        const prefixes = new Map<string, string>();
+        for (const [id, provider] of Object.entries(providers ?? {})) {
+            const baseURL = provider?.options?.baseURL;
             const prefix = baseURL ? normaliseBaseUrl(baseURL) : undefined;
+            if (prefix) prefixes.set(id, prefix);
+        }
+
+        const selected = new Set(this.config.providers);
+        for (const id of this.config.providers) {
+            const prefix = prefixes.get(id);
             if (!prefix) {
                 this.unresolvedProviders.push(id);
                 continue;
             }
+
+            const sharedWith = [...prefixes]
+                .filter(([other, otherPrefix]) => other !== id && otherPrefix === prefix && !selected.has(other))
+                .map(([other]) => other);
+            if (sharedWith.length > 0) {
+                this.ambiguousProviders.push(`${id} shares ${prefix} with unselected ${sharedWith.join(", ")}`);
+                continue;
+            }
+
             if (!this.targets.some((target) => target.prefix === prefix)) {
                 this.targets.push({ prefix, source: `provider: ${id}` });
             }
@@ -334,6 +392,11 @@ export class RelayFastMatcher {
         return [...this.unresolvedProviders];
     }
 
+    describeAmbiguous(): string[] {
+        return [...this.ambiguousProviders];
+    }
+
+    /** Returns the sanitised URL (origin + path; no credentials, query or fragment) when it is a Fast endpoint. */
     matchesUrl(input: RequestInfo | URL): string | undefined {
         let url: URL;
         try {
@@ -346,7 +409,7 @@ export class RelayFastMatcher {
         for (const target of this.targets) {
             if (!full.startsWith(target.prefix)) continue;
             const rest = full.slice(target.prefix.length);
-            if (this.endpoints.includes(rest)) return url.href;
+            if (this.endpoints.includes(rest)) return full;
         }
         return undefined;
     }
@@ -356,30 +419,111 @@ export class RelayFastMatcher {
         return this.modelPatterns.some((pattern) => pattern.test(model));
     }
 
-    inject(input: RequestInfo | URL, init?: RequestInit): InjectionResult {
-        if (this.targets.length === 0) return { init };
-        if (init?.method && init.method.toUpperCase() !== "POST") return { init };
-
-        const url = this.matchesUrl(input);
-        if (!url) return { init };
-
-        const body = parseBody(init?.body);
-        if (!body) return { init };
+    /** Rewrite a JSON request body; returns undefined when nothing should change. */
+    injectBody(rawBody: string): { body: string; model: string } | undefined {
+        const body = parseJsonObject(rawBody);
+        if (!body) return undefined;
 
         const model = typeof body.model === "string" ? body.model : undefined;
-        if (!model || !this.matchesModel(model)) return { init };
-        if (body.service_tier === this.serviceTier) return { init };
+        if (!model || !this.matchesModel(model)) return undefined;
+        if (body.service_tier === this.serviceTier) return undefined;
 
-        return {
-            init: {
-                ...init,
-                headers: withoutContentLength(init?.headers),
-                body: JSON.stringify({ ...body, service_tier: this.serviceTier }),
-            },
-            model,
-            url,
-        };
+        return { body: JSON.stringify({ ...body, service_tier: this.serviceTier }), model };
     }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Shared runtime                                                            */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * OpenCode may initialise a plugin more than once per process (one instance
+ * per project directory). All instances share this controller and a single
+ * fetch wrapper, so `/fast off` in any instance stops injection everywhere.
+ */
+type Controller = {
+    config: RelayFastConfig;
+    matcher: RelayFastMatcher;
+    state: RelayFastState;
+    log: (level: "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) => void;
+};
+
+const CONTROLLER_KEY = Symbol.for(`${PLUGIN_NAME}.controller`);
+const ORIGINAL_FETCH_KEY = Symbol.for(`${PLUGIN_NAME}.originalFetch`);
+
+type GlobalWithPlugin = typeof globalThis & {
+    [CONTROLLER_KEY]?: Controller;
+    [ORIGINAL_FETCH_KEY]?: typeof globalThis.fetch;
+};
+
+function getController(): Controller | undefined {
+    return (globalThis as GlobalWithPlugin)[CONTROLLER_KEY];
+}
+
+function persistState(controller: Controller): void {
+    try {
+        atomicWriteJson(STATE_PATH, controller.state);
+    } catch (error) {
+        controller.log("warn", "Failed to persist state", {
+            path: STATE_PATH,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+}
+
+async function fastFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const g = globalThis as GlobalWithPlugin;
+    const originalFetch = g[ORIGINAL_FETCH_KEY]!;
+    const controller = getController();
+    if (!controller || !controller.state.enabled || !controller.matcher.hasTargets) {
+        return originalFetch(input, init);
+    }
+
+    const { matcher, config, state } = controller;
+    const url = matcher.matchesUrl(input);
+    if (!url) return originalFetch(input, init);
+
+    const request = await readRequest(input, init);
+    if (request.method !== "POST" || request.body === undefined) return originalFetch(input, init);
+
+    const injected = matcher.injectBody(request.body);
+    if (!injected) return originalFetch(input, init);
+
+    state.injectionCount += 1;
+    state.lastInjectedAt = new Date().toISOString();
+    state.lastInjectedModel = injected.model;
+    state.lastInjectedUrl = url;
+    persistState(controller);
+    if (config.logInjections) {
+        controller.log("info", "Injected service tier", {
+            serviceTier: config.serviceTier,
+            model: injected.model,
+            url,
+        });
+    }
+
+    return originalFetch(input, {
+        ...init,
+        method: request.method,
+        headers: withoutContentLength(request.headers),
+        body: injected.body,
+    });
+}
+
+/** Install the fetch wrapper exactly once per process. Exposed for tests. */
+export function installFetchWrapper(): void {
+    const g = globalThis as GlobalWithPlugin;
+    if (g[ORIGINAL_FETCH_KEY] && globalThis.fetch === fastFetch) return;
+    g[ORIGINAL_FETCH_KEY] = globalThis.fetch;
+    globalThis.fetch = fastFetch;
+}
+
+/** Restore the original fetch and forget the controller. Exposed for tests. */
+export function uninstallFetchWrapper(): void {
+    const g = globalThis as GlobalWithPlugin;
+    if (g[ORIGINAL_FETCH_KEY]) globalThis.fetch = g[ORIGINAL_FETCH_KEY];
+    delete g[ORIGINAL_FETCH_KEY];
+    delete g[CONTROLLER_KEY];
 }
 
 /* ------------------------------------------------------------------------ */
@@ -388,15 +532,8 @@ export class RelayFastMatcher {
 
 const plugin: Plugin = async (ctx) => {
     const { config, error: configError } = readConfig();
-    const matcher = new RelayFastMatcher(config);
-    let state = readState();
-    const originalFetch = globalThis.fetch;
 
-    const log = (
-        level: "info" | "warn" | "error",
-        message: string,
-        extra?: Record<string, unknown>,
-    ): void => {
+    const log: Controller["log"] = (level, message, extra) => {
         void ctx.client.app
             .log({ body: { service: PLUGIN_NAME, level, message, extra } })
             .catch(() => undefined);
@@ -408,18 +545,21 @@ const plugin: Plugin = async (ctx) => {
             .catch(() => undefined);
     };
 
-    const persistState = (): void => {
-        try {
-            atomicWriteJson(STATE_PATH, state);
-        } catch (error) {
-            log("warn", "Failed to persist state", {
-                path: STATE_PATH,
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
+    // Re-initialisation replaces config/matcher but keeps the single shared state.
+    const existing = getController();
+    const controller: Controller = {
+        config,
+        matcher: new RelayFastMatcher(config),
+        state: existing?.state ?? readState(),
+        log,
     };
+    (globalThis as GlobalWithPlugin)[CONTROLLER_KEY] = controller;
+    installFetchWrapper();
+
+    if (configError) log("warn", configError);
 
     const formatStatus = (): string => {
+        const { state, matcher } = controller;
         const lines = [
             `Fast mode is ${state.enabled ? "ON" : "OFF"} (service_tier=${config.serviceTier}).`,
             `Injected requests: ${state.injectionCount}.`,
@@ -433,64 +573,49 @@ const plugin: Plugin = async (ctx) => {
         if (unresolved.length > 0) {
             lines.push(`Unresolved providers (no baseURL in opencode config): ${unresolved.join(", ")}`);
         }
+        const ambiguous = matcher.describeAmbiguous();
+        if (ambiguous.length > 0) {
+            lines.push(`Skipped ambiguous providers: ${ambiguous.join("; ")}. List both providers or use baseURLs to opt in.`);
+        }
         lines.push(`Models: ${config.models.length > 0 ? config.models.join(", ") : "all"}.`);
-        if (configError) lines.push(`Config error: ${configError}`);
+        if (configError) lines.push(`Config error (injection disabled): ${configError}`);
         return lines.join(" ");
     };
 
     const handleCommand = (argument: string): { message: string; short: string } => {
         const action = argument.trim().toLowerCase();
         if (action && !["on", "off", "toggle", "status"].includes(action)) {
-            return {
-                message: `Usage: /${COMMAND_NAME} [on|off|toggle|status]`,
-                short: `Usage: /${COMMAND_NAME} [on|off|toggle|status]`,
-            };
+            const usage = `Usage: /${COMMAND_NAME} [on|off|toggle|status]`;
+            return { message: usage, short: usage };
         }
 
+        const { state } = controller;
         if (action !== "status") {
             state.enabled = action === "on" ? true : action === "off" ? false : !state.enabled;
-            persistState();
+            persistState(controller);
         }
 
         const short = `Fast mode ${state.enabled ? "ON" : "OFF"} (${state.injectionCount} injected)`;
         return { message: formatStatus(), short };
     };
 
-    if (configError) log("warn", configError);
-
-    const wrappedFetch: typeof globalThis.fetch = async (input, init) => {
-        if (!state.enabled) return originalFetch(input, init);
-
-        const result = matcher.inject(input, init);
-        if (result.model && result.url) {
-            state.injectionCount += 1;
-            state.lastInjectedAt = new Date().toISOString();
-            state.lastInjectedModel = result.model;
-            state.lastInjectedUrl = result.url;
-            persistState();
-            if (config.logInjections) {
-                log("info", "Injected service tier", {
-                    serviceTier: config.serviceTier,
-                    model: result.model,
-                    url: result.url,
-                });
-            }
-        }
-        return originalFetch(input, result.init);
-    };
-
-    globalThis.fetch = wrappedFetch;
-
     return {
         config: async (opencodeConfig) => {
-            matcher.resolveProviders(opencodeConfig.provider);
-            const unresolved = matcher.describeUnresolved();
+            controller.matcher.resolveProviders(opencodeConfig.provider);
+
+            const unresolved = controller.matcher.describeUnresolved();
             if (unresolved.length > 0) {
                 log("warn", "Configured providers have no baseURL in OpenCode config", {
                     providers: unresolved,
                 });
             }
-            if (!matcher.hasTargets) {
+            const ambiguous = controller.matcher.describeAmbiguous();
+            if (ambiguous.length > 0) {
+                log("warn", "Skipped providers that share a base URL with unselected providers", {
+                    providers: ambiguous,
+                });
+            }
+            if (!controller.matcher.hasTargets) {
                 log("warn", `No targets configured; edit ${CONFIG_PATH}`);
             }
 
@@ -506,7 +631,7 @@ const plugin: Plugin = async (ctx) => {
             if (input.command !== COMMAND_NAME) return;
 
             const { message, short } = handleCommand(input.arguments);
-            toast(short, state.enabled ? "success" : "info");
+            toast(short, controller.state.enabled ? "success" : "info");
 
             // OpenCode has no way to cancel a command from this hook, so the
             // prompt is replaced with a one-line echo request. It still costs

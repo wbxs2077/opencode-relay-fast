@@ -103,6 +103,20 @@ export { default } from "file:///绝对路径/opencode-relay-fast/dist/index.js"
 
 文件路径可以用环境变量 `OPENCODE_RELAY_FAST_CONFIG` 和 `OPENCODE_RELAY_FAST_STATE` 覆盖。
 
+### 安全规则（宁可不注入）
+
+优先处理是要花钱的，所以插件在拿不准时一律不注入：
+
+- **配置无效就停止注入。** 文件格式错误或字段类型不对（比如把 `"models"` 写成字符串而不是数组）
+  会在 `/fast status` 和日志里报出来，修好之前不会注入任何请求。
+- **共用 baseURL 的 provider 会被跳过。** 请求是按 URL 匹配的，如果选中的 provider 和未选中的
+  provider 有相同的 `baseURL`，插件无法区分它们，会跳过这个 provider 并在 `/fast status` 里说明。
+  把两个 provider 都列上，或者把这个 URL 写进 `baseURLs`，表示你明确要按 URL 整体匹配。
+- **只记录 origin 和路径。** 请求 URL 里的凭据、query 参数和 fragment 不会进入状态文件、日志或
+  `/fast` 的 prompt。
+- **每个进程只包一层 fetch。** OpenCode 可能按项目目录多次初始化插件，所有实例共用一个开关，
+  在任何地方执行 `/fast off` 都会全局停止注入。
+
 ## 使用
 
 ```text
@@ -138,7 +152,8 @@ npm test      # tsc 构建 + node --test
 npm run dev   # opencode plugin dev
 ```
 
-匹配器 `RelayFastMatcher`、JSONC 去注释函数和 `parseConfig` 都有导出，方便测试和在其他插件里复用。
+匹配器 `RelayFastMatcher`、JSONC 去注释函数、`parseConfig` 以及
+`installFetchWrapper` / `uninstallFetchWrapper` 都有导出，方便测试和在其他插件里复用。
 
 ## 致谢
 
