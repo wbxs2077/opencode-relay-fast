@@ -1,17 +1,51 @@
 {
-  "name": "opencodex-fast",
-  "version": "0.1.1",
+  "name": "opencode-relay-fast",
+  "version": "0.2.0",
   "type": "module",
-  "description": "OpenCode plugin that adds Codex priority service tier behind /fast",
+  "description": "OpenCode plugin that toggles OpenAI priority service tier (Fast mode) for third-party relay providers such as sub2api",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "openai",
+    "service_tier",
+    "priority",
+    "fast-mode",
+    "sub2api",
+    "relay",
+    "codex"
+  ],
+  "license": "MIT",
+  "author": "wbxs2077",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wbxs2077/opencode-relay-fast.git"
+  },
+  "homepage": "https://github.com/wbxs2077/opencode-relay-fast#readme",
+  "bugs": {
+    "url": "https://github.com/wbxs2077/opencode-relay-fast/issues"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
-    "README.md"
+    "examples",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean && tsc",
+    "test": "npm run build && node --test test/*.test.mjs",
     "prepack": "npm run build",
     "dev": "opencode plugin dev"
   },

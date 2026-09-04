@@ -1,0 +1,31 @@
+// Copy this file to ~/.config/opencode/opencode-relay-fast.jsonc
+// (or $XDG_CONFIG_HOME/opencode/opencode-relay-fast.jsonc) and edit it.
+// Comments and trailing commas are allowed. Restart OpenCode after changes.
+{
+  // Provider IDs from your opencode.json / opencode.jsonc `provider` map.
+  // Their `options.baseURL` is resolved automatically, so you never repeat the URL here.
+  "providers": ["my-relay"],
+
+  // Optional: extra base URLs to target that are not defined as OpenCode providers.
+  // The plugin matches `<baseURL><endpoint>`, so include any path prefix like `/v1`.
+  "baseURLs": [
+    // "https://relay.example.com/v1"
+  ],
+
+  // Endpoints (relative to the base URL) that accept `service_tier`.
+  // Defaults to the two OpenAI endpoints below.
+  "endpoints": ["/responses", "/chat/completions"],
+
+  // Optional: only inject for these model IDs. `*` is a wildcard. Empty = every model.
+  // Restrict this if your relay forwards unknown models to backends that reject `service_tier`.
+  "models": ["gpt-5.5", "gpt-5.6-*"],
+
+  // Value written into the request body. OpenAI accepts "auto" | "default" | "flex" | "priority".
+  "serviceTier": "priority",
+
+  // Optional: route the `/fast` command's tiny echo request through a cheap model.
+  // "commandModel": "my-relay/gpt-5.4-mini",
+
+  // Write a log line (`~/.local/share/opencode/log/`) for every injected request.
+  "logInjections": true,
+}
