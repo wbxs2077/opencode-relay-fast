@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `overwriteServiceTier` (default `true`, the previous behaviour). Set it to `false` to leave
+  requests that already carry a `service_tier` unchanged.
+
+### Fixed
+
+- Re-initialising the plugin after another plugin had wrapped `fetch` made the two wrappers call
+  each other forever, overflowing the stack on every request. The wrapper is now installed once.
+- With several projects open, only the last initialised project's providers were targeted, and
+  `/fast status` in earlier projects described a matcher that was no longer active. Every open
+  project's providers are now targeted, and a provider URL that another open project uses for an
+  unselected provider is skipped (fail closed).
+- `serviceTier`, `commandModel`, `logInjections` and `overwriteServiceTier` with a wrong type now
+  disable injection like other invalid fields, instead of silently falling back to defaults.
+- The state file is no longer rewritten synchronously on every injected request; counters are
+  written at most once a second, on every `/fast` command, and on exit.
+- CI pins third-party actions to commit SHAs, uses read-only permissions and skips install scripts.
+
 ## [0.2.1] - 2026-09-04
 
 Hardening release after an adversarial review. No configuration changes are required.

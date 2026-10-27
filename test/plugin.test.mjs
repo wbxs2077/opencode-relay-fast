@@ -36,8 +36,9 @@ const OPENCODE_CONFIG = {
     },
 };
 
-function makeContext(logs, toasts) {
+function makeContext(logs, toasts, directory) {
     return {
+        directory,
         client: {
             app: { log: async (input) => logs.push(input) },
             tui: { showToast: async (input) => toasts.push(input) },
@@ -46,7 +47,7 @@ function makeContext(logs, toasts) {
 }
 
 /** Fresh process-like start: remove any installed wrapper and controller, then load the plugin. */
-async function loadPlugin({ opencodeConfig = OPENCODE_CONFIG, fresh = true } = {}) {
+async function loadPlugin({ opencodeConfig = OPENCODE_CONFIG, fresh = true, directory } = {}) {
     const requests = [];
     const logs = [];
     const toasts = [];
@@ -63,7 +64,7 @@ async function loadPlugin({ opencodeConfig = OPENCODE_CONFIG, fresh = true } = {
             return new Response("{}", { status: 200 });
         };
     }
-    const hooks = await plugin(makeContext(logs, toasts));
+    const hooks = await plugin(makeContext(logs, toasts, directory));
     const cfg = structuredClone(opencodeConfig);
     await hooks.config(cfg);
     return { hooks, requests, logs, toasts, opencodeConfig: cfg };
@@ -124,6 +125,14 @@ test("parseConfig applies defaults, normalises endpoints and rejects wrong types
     assert.throws(() => parseConfig(`{ "providers": [1] }`), /"providers" must be an array/);
     assert.throws(() => parseConfig(`{ "baseURLs": [""] }`), /"baseURLs" must be an array/);
     assert.throws(() => parseConfig(`[]`), /must be a JSON object/);
+
+    assert.equal(parseConfig("{}").overwriteServiceTier, true);
+    assert.equal(parseConfig(`{ "overwriteServiceTier": false }`).overwriteServiceTier, false);
+    assert.throws(() => parseConfig(`{ "serviceTier": 1 }`), /"serviceTier" must be a non-empty string/);
+    assert.throws(() => parseConfig(`{ "serviceTier": " " }`), /"serviceTier" must be a non-empty string/);
+    assert.throws(() => parseConfig(`{ "commandModel": true }`), /"commandModel" must be a non-empty string/);
+    assert.throws(() => parseConfig(`{ "logInjections": "no" }`), /"logInjections" must be true or false/);
+    assert.throws(() => parseConfig(`{ "overwriteServiceTier": 0 }`), /"overwriteServiceTier" must be true or false/);
 });
 
 test("matcher resolves providers, matches base URL prefix plus endpoint, strips query", () => {
@@ -308,6 +317,81 @@ test("re-initialisation shares one controller: /fast off in a later instance sto
     // exactly one wrapper layer: each request reaches the mock once
     assert.equal(first.requests.length, 3);
     assert.equal(second.requests.length, 0);
+});
+
+test("re-initialisation after another plugin wraps fetch does not recurse", async () => {
+    const first = await loadPlugin();
+    await runFast(first.hooks, "on");
+
+    // Another plugin wraps fetch after ours, then OpenCode initialises ours again.
+    let outerCalls = 0;
+    const inner = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+        outerCalls += 1;
+        if (outerCalls > 10) throw new Error("fetch wrapper recursion");
+        return inner(input, init);
+    };
+    await loadPlugin({ fresh: false });
+
+    await post("https://relay-a.example.com/v1/responses", { model: "gpt-5.5" });
+    assert.equal(outerCalls, 1);
+    assert.equal(first.requests.length, 1);
+    assert.equal(lastTier(first.requests), "priority");
+});
+
+test("every open project's providers stay targeted; cross-project shared URLs fail closed", async () => {
+    const first = await loadPlugin({ directory: "/projects/a" });
+    await runFast(first.hooks, "on");
+
+    // A second project without relay-a must not drop the first project's target.
+    const second = await loadPlugin({
+        fresh: false,
+        directory: "/projects/b",
+        opencodeConfig: { provider: { other: { options: { baseURL: "https://other.example.com/v1" } } } },
+    });
+    await post("https://relay-a.example.com/v1/responses", { model: "gpt-5.5" });
+    assert.equal(lastTier(first.requests), "priority");
+    assert.match(await runFast(second.hooks, "status"), /provider: relay-a/);
+
+    // A third project uses relay-a's URL for an unselected provider: requests are ambiguous.
+    const third = await loadPlugin({
+        fresh: false,
+        directory: "/projects/c",
+        opencodeConfig: { provider: { plain: { options: { baseURL: "https://relay-a.example.com/v1" } } } },
+    });
+    await post("https://relay-a.example.com/v1/responses", { model: "gpt-5.5" });
+    assert.equal(lastTier(first.requests), undefined);
+    assert.match(await runFast(third.hooks, "status"), /another open project uses for an unselected provider: .*provider: relay-a/);
+
+    // Explicit baseURLs remain a deliberate opt-in.
+    await post("https://explicit.example.com/openai/v1/responses", { model: "gpt-5.5" });
+    assert.equal(lastTier(first.requests), "priority");
+});
+
+test("overwriteServiceTier: false preserves a tier the request already carries", async () => {
+    writeFileSync(configPath, `{ "providers": ["relay-a"], "overwriteServiceTier": false }`);
+    const { hooks, requests } = await loadPlugin();
+    await runFast(hooks, "on");
+
+    const original = JSON.stringify({ model: "gpt-5.5", service_tier: "flex" });
+    await globalThis.fetch("https://relay-a.example.com/v1/responses", { method: "POST", body: original });
+    assert.equal(requests.at(-1).body, original);
+    await post("https://relay-a.example.com/v1/responses", { model: "gpt-5.5" });
+    assert.equal(lastTier(requests), "priority");
+    assert.match(await runFast(hooks, "status"), /Existing service_tier values are preserved/);
+    writeFileSync(configPath, BASE_CONFIG);
+});
+
+test("injection counters are persisted off the request path and flushed by /fast", async () => {
+    const { hooks } = await loadPlugin();
+    await runFast(hooks, "on");
+    const before = JSON.parse(readFileSync(statePath, "utf8")).injectionCount;
+
+    await post("https://relay-a.example.com/v1/responses", { model: "gpt-5.5" });
+    assert.equal(JSON.parse(readFileSync(statePath, "utf8")).injectionCount, before);
+
+    await runFast(hooks, "status");
+    assert.equal(JSON.parse(readFileSync(statePath, "utf8")).injectionCount, before + 1);
 });
 
 test("off and toggle change state; non-POST and other commands are ignored", async () => {

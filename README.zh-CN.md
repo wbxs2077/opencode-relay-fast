@@ -23,8 +23,10 @@ OpenCode 没有按 provider 切换 `service_tier` 的开关。上游的
    - Fast mode 已打开（`/fast on`）；
    - URL 是 `<baseURL>/responses` 或 `<baseURL>/chat/completions`（可配置）；
    - 方法是 POST，且 JSON body 里的 `model` 命中你的模型 glob；
-   - `service_tier` 还没有被设成目标值。
-3. 每次注入都会累加计数并写一条日志，方便你确认它真的生效了。
+   - `service_tier` 还没有被设成目标值（如果设了 `"overwriteServiceTier": false`，则要求请求里
+     完全没有 `service_tier`）。
+3. 每次注入都会累加计数并写一条日志，方便你确认它真的生效了。计数最多每秒写一次状态文件，
+   每次执行 `/fast` 命令时也会立即写入。
 
 其他一切，包括别的 provider、别的端点、非 JSON body，都原样透传。
 
@@ -80,6 +82,9 @@ export { default } from "file:///绝对路径/opencode-relay-fast/dist/index.js"
   // "auto" | "default" | "flex" | "priority"
   "serviceTier": "priority",
 
+  // 请求里已经带了 service_tier 时是否覆盖。false 表示这类请求原样放行
+  "overwriteServiceTier": true,
+
   // 可选：让 /fast 命令本身走一个便宜的模型
   // "commandModel": "my-relay/gpt-5.4-mini",
 
@@ -107,7 +112,7 @@ export { default } from "file:///绝对路径/opencode-relay-fast/dist/index.js"
 
 优先处理是要花钱的，所以插件在拿不准时一律不注入：
 
-- **配置无效就停止注入。** 文件格式错误或字段类型不对（比如把 `"models"` 写成字符串而不是数组）
+- **配置无效就停止注入。** 文件格式错误或字段类型不对（比如把 `"models"` 写成字符串而不是数组，或者写成 `"serviceTier": 1`）
   会在 `/fast status` 和日志里报出来，修好之前不会注入任何请求。
 - **共用 baseURL 的 provider 会被跳过。** 请求是按 URL 匹配的，如果选中的 provider 和未选中的
   provider 有相同的 `baseURL`，插件无法区分它们，会跳过这个 provider 并在 `/fast status` 里说明。
@@ -115,7 +120,9 @@ export { default } from "file:///绝对路径/opencode-relay-fast/dist/index.js"
 - **只记录 origin 和路径。** 请求 URL 里的凭据、query 参数和 fragment 不会进入状态文件、日志或
   `/fast` 的 prompt。
 - **每个进程只包一层 fetch。** OpenCode 可能按项目目录多次初始化插件，所有实例共用一个开关，
-  在任何地方执行 `/fast off` 都会全局停止注入。
+  在任何地方执行 `/fast off` 都会全局停止注入。每个打开的项目按自己的配置解析 provider；如果某个
+  provider 的 URL 在另一个打开的项目里属于未选中的 provider，就会被跳过。fetch 包装只安装一次，
+  其他插件也包装 `fetch` 时不会互相递归。
 
 ## 使用
 

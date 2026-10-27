@@ -26,8 +26,10 @@ relay, nothing sends the priority hint. This plugin closes that gap without you 
    - Fast mode is ON (`/fast on`),
    - the URL is `<baseURL>/responses` or `<baseURL>/chat/completions` (configurable),
    - the method is POST and the JSON body has a `model` matching your model globs,
-   - `service_tier` is not already set to the target value.
-3. Every injection bumps a counter and writes a log line, so you can prove it happened.
+   - `service_tier` is not already set to the target value (and, with
+     `"overwriteServiceTier": false`, not set at all).
+3. Every injection bumps a counter and writes a log line, so you can prove it happened. The
+   counter is written to the state file at most once a second, and on every `/fast` command.
 
 Everything else, including other providers, other endpoints, and non-JSON bodies, passes through
 untouched.
@@ -85,6 +87,9 @@ allowed.
   // "auto" | "default" | "flex" | "priority"
   "serviceTier": "priority",
 
+  // Replace a service_tier the request already carries. false = leave such requests alone.
+  "overwriteServiceTier": true,
+
   // Optional: run the /fast command itself on a cheap model
   // "commandModel": "my-relay/gpt-5.4-mini",
 
@@ -113,7 +118,7 @@ Paths can be overridden with `OPENCODE_RELAY_FAST_CONFIG` and `OPENCODE_RELAY_FA
 Priority processing costs money, so the plugin refuses to guess:
 
 - **Invalid config disables injection.** A malformed file or a wrongly typed field (for example
-  `"models": "gpt-5.5"` instead of an array) is reported in `/fast status` and the log, and
+  `"models": "gpt-5.5"` instead of an array, or `"serviceTier": 1`) is reported in `/fast status` and the log, and
   nothing is injected until it is fixed.
 - **Providers that share a base URL are skipped.** Requests are matched by URL, so if a selected
   provider has the same `baseURL` as an unselected one, the plugin cannot tell them apart. It
@@ -122,7 +127,10 @@ Priority processing costs money, so the plugin refuses to guess:
 - **Only origin and path are recorded.** Credentials, query strings and fragments in request
   URLs never reach the state file, the log, or the `/fast` prompt.
 - **One wrapper per process.** OpenCode may initialise plugins once per project directory; all
-  instances share one switch, so `/fast off` anywhere stops injection everywhere.
+  instances share one switch, so `/fast off` anywhere stops injection everywhere. Each open
+  project's providers are resolved from its own config, and a provider URL is skipped when
+  another open project uses it for an unselected provider. The wrapper is never re-installed,
+  so it stays safe when other plugins also wrap `fetch`.
 
 ## Use
 

@@ -30,6 +30,10 @@
   // Value written into the request body. OpenAI accepts "auto" | "default" | "flex" | "priority".
   "serviceTier": "priority",
 
+  // Replace a service_tier the request already carries (default true).
+  // Set to false to leave requests that already choose a tier untouched.
+  "overwriteServiceTier": true,
+
   // Optional: route the `/fast` command's tiny echo request through a cheap model.
   // "commandModel": "my-relay/gpt-5.4-mini",
 
